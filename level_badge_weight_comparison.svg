@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="360" viewBox="0 0 960 360">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop stop-color="#063454"/><stop offset="1" stop-color="#07172d"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="b"/>
+      <feOffset in="b" dx="1.5" dy="2" result="o"/>
+      <feMerge><feMergeNode in="o"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="960" height="360" fill="url(#bg)"/>
+  <text x="480" y="52" text-anchor="middle" fill="#dff8ff" font-family="Arial, sans-serif" font-size="25" font-weight="bold">LEVEL BADGE WEIGHT COMPARISON</text>
+  <text x="240" y="100" text-anchor="middle" fill="#8fefff" font-family="Arial, sans-serif" font-size="22" font-weight="bold">修正前：太字（bold）</text>
+  <text x="720" y="100" text-anchor="middle" fill="#8fefff" font-family="Arial, sans-serif" font-size="22" font-weight="bold">修正後：少し細い（w500）</text>
+  <g transform="translate(104 136)">
+    <rect width="272" height="105" rx="10" fill="#092440" stroke="#1a9ad2" stroke-width="2"/>
+    <rect x="26" y="25" width="78" height="54" rx="7" fill="#d23b48"/>
+    <text x="65" y="66" text-anchor="middle" fill="white" stroke="#00101e" stroke-width="2" paint-order="stroke" font-family="Arial, sans-serif" font-size="32" font-weight="800" filter="url(#shadow)">12</text>
+    <text x="124" y="58" fill="white" font-family="Arial, sans-serif" font-size="21">EXAMPLE MUSIC</text>
+  </g>
+  <g transform="translate(584 136)">
+    <rect width="272" height="105" rx="10" fill="#092440" stroke="#1a9ad2" stroke-width="2"/>
+    <rect x="26" y="25" width="78" height="54" rx="7" fill="#d23b48"/>
+    <text x="65" y="66" text-anchor="middle" fill="white" stroke="#00101e" stroke-width="2" paint-order="stroke" font-family="Arial, sans-serif" font-size="32" font-weight="500" filter="url(#shadow)">12</text>
+    <text x="124" y="58" fill="white" font-family="Arial, sans-serif" font-size="21">EXAMPLE MUSIC</text>
+  </g>
+  <text x="480" y="305" text-anchor="middle" fill="#c2dae7" font-family="Arial, sans-serif" font-size="18">※ 実装では両方ともゴチカクットを使用し、数字の太さだけを変更しています。</text>
+</svg>

@@ -1,0 +1,30 @@
+name: iidx_play_data
+description: Personal beatmania IIDX play data viewer for iOS, Android, and Windows.
+publish_to: none
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  file_picker: ^8.1.7
+  shared_preferences: ^2.2.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/blue_sky_base.png
+    - assets/images/blue_sky_clean.png
+    - assets/data/music_master.json
+    - assets/data/title_aliases.json
+  fonts:
+    - family: Gochikakutto
+      fonts:
+        - asset: assets/fonts/851Gkktt_005.ttf
