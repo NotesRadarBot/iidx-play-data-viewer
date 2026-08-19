@@ -153,6 +153,7 @@ class AppRepository {
   // CSV取込・削除時だけ無効化して、通常表示は O(1) で引けるようにする。
   Map<String, PlayRecord>? _latestPlayRecordByChartId;
   Map<String, PlayRecord>? _bestPlayRecordByChartId;
+  Map<String, PlayRecord>? _historicalBestPlayRecordByChartId;
   Map<String, RivalRecord>? _latestRivalRecordByChart;
   // 旧版が作成した未一致CSV行を退避しておく領域。以後は表示用マスタへ
   // 追加しないため、表記ゆれによる重複楽曲を画面に出さない。
@@ -170,6 +171,7 @@ class AppRepository {
   void _invalidateRecordIndexes() {
     _latestPlayRecordByChartId = null;
     _bestPlayRecordByChartId = null;
+    _historicalBestPlayRecordByChartId = null;
     _latestRivalRecordByChart = null;
   }
 
@@ -225,6 +227,30 @@ class AppRepository {
       }
     }
     return _bestPlayRecordByChartId = index;
+  }
+
+  /// 現行（取込み済みCSVのうち最も新しい版）を除いた、過去版だけの
+  /// 自己ベスト。MY BEST は現行スコアと比較するため、この索引を使う。
+  Map<String, PlayRecord> get _historicalBestPlayRecordIndex {
+    final existing = _historicalBestPlayRecordByChartId;
+    if (existing != null) return existing;
+    final latestVersion = latestPlayerDataVersion;
+    if (latestVersion == null) return const {};
+    final index = <String, PlayRecord>{};
+    for (final record in _records) {
+      final version = record.dataVersion ?? record.version;
+      if (_compareIidxVersions(version, latestVersion) >= 0) continue;
+      final current = index[record.chartId];
+      if (current == null ||
+          record.score > current.score ||
+          (record.score == current.score &&
+              _compareIidxVersions(version,
+                      current.dataVersion ?? current.version) <
+                  0)) {
+        index[record.chartId] = record;
+      }
+    }
+    return _historicalBestPlayRecordByChartId = index;
   }
 
   String _rivalChartKey(int slot, PlayStyle style, String version,
@@ -637,6 +663,8 @@ class AppRepository {
       charts.where((chart) => chart.style == style).toList();
   PlayRecord? recordFor(String chartId) => _playRecordIndex[chartId];
   PlayRecord? bestRecordFor(String chartId) => _bestPlayRecordIndex[chartId];
+  PlayRecord? historicalBestRecordFor(String chartId) =>
+      _historicalBestPlayRecordIndex[chartId];
 
   /// 取り込み済み自分データのうち、CSV取得時点が最も新しい版。
   String? get latestPlayerDataVersion {
@@ -661,7 +689,7 @@ class AppRepository {
       2;
 
   String playerBestNameFor(String chartId) {
-    final record = bestRecordFor(chartId);
+    final record = historicalBestRecordFor(chartId);
     final version = record?.dataVersion ?? record?.version;
     return version == null
         ? 'MY BEST'
@@ -853,9 +881,8 @@ class AppRepository {
           score: mine,
           clear: recordFor(chart.id)?.clear ?? ClearType.noPlay,
           isMe: true));
-      // 最新版の自分の行とは別に、全履歴中の最高スコアを表示する。
-      // 同点時の版は _bestPlayRecordIndex で古い方を選んでいる。
-      final best = bestRecordFor(chart.id);
+      // 最新版の自分の行とは別に、過去版だけの最高スコアを表示する。
+      final best = historicalBestRecordFor(chart.id);
       if (hasHistoricalPlayerData && best != null) {
         scores.add(RivalScore(
             name: playerBestNameFor(chart.id),

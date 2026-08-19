@@ -31,6 +31,12 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
   ChartType _chartType = ChartType.another;
   late String _folder;
   String _sort = 'デフォルト';
+  String _searchQuery = '';
+  // 検索を開始した時点の譜面種類を、検索結果の基準として固定する。
+  // 選択行が別の譜面へ移っただけで検索結果全体を再生成しないための値。
+  ChartType? _searchChartType;
+  String? _searchResultsCacheKey;
+  List<Chart>? _searchResultsCache;
   bool _folderSelected = true;
   String? _expandedFolder;
   // VERSION／INITIALフォルダでは、開いた時点で指定されていた譜面種類を
@@ -52,15 +58,27 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
   // 抽出／ソートし直さない。PLAY DATA画面を離れた時点でStateごと破棄され、
   // CSV取込後に古い内容を使い続けることもない。
   final Map<String, List<Chart>> _folderSongsCache = {};
+  // 選択曲を切り替えるたびに全譜面から同名曲を検索しない。スクロール中の
+  // PLAY DATA更新ではこの経路が最も頻繁に呼ばれる。
+  final Map<PlayStyle, Map<String, List<Chart>>> _songChartsCache = {};
+  // RIVAL SCORE DATAも、同一画面中は楽曲データが変わらないためキャッシュする。
+  final Map<String, List<RivalScore>> _rivalScoresCache = {};
+  final Map<String, PlayRecord> _playRecordCache = {};
+  final Map<PlayStyle, List<RivalProfile>> _rivalProfilesCache = {};
   // フォルダ行のクリアランプは、フォルダ内容を毎フレーム集計せずに保持する。
   // この画面を閉じてCSVを取り込んだ場合はStateごと作り直される。
   final Map<String, ClearType?> _folderClearCache = {};
   final Map<PlayStyle, List<Chart>> _styleChartsCache = {};
   final GlobalKey<_MusicSelectPanelState> _musicSelectKey =
       GlobalKey<_MusicSelectPanelState>();
+  // 選択行の移動では右側リストを含む画面全体を再構築しない。
+  // 左側の楽曲情報・スコア・レーダーだけをこの通知で更新する。
+  final ValueNotifier<int> _selectionRevision = ValueNotifier(0);
   Timer? _arrowRepeatDelayTimer;
   Timer? _arrowRepeatTimer;
   LogicalKeyboardKey? _heldArrowKey;
+
+  void _notifySelectionChanged() => _selectionRevision.value++;
 
   @override
   void initState() {
@@ -79,21 +97,29 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
 
   List<Chart> get _styleCharts => _styleChartsCache.putIfAbsent(
       _style, () => List.unmodifiable(widget.repository.forStyle(_style)));
-  List<Chart> get _selectedSongCharts => _selectedSongTitle == null
-      ? _styleCharts
-      : _styleCharts
-          .where((item) => item.songTitle == _selectedSongTitle)
-          .toList();
+  List<Chart> get _selectedSongCharts {
+    final title = _selectedSongTitle;
+    if (title == null) return _styleCharts;
+    final perStyle = _songChartsCache.putIfAbsent(_style, () => {});
+    return perStyle.putIfAbsent(
+        title,
+        () => List.unmodifiable(
+            _styleCharts.where((item) => item.songTitle == title)));
+  }
   Chart get _chart =>
       _selectedSongCharts
           .where((item) => item.type == _chartType)
           .firstOrNull ??
       _selectedSongCharts.first;
-  PlayRecord? get _record => widget.repository.recordFor(_chart.id);
+  PlayRecord? get _record => _recordFor(_chart);
   List<RivalProfile> get _rivalProfiles =>
-      widget.repository.importedRivalsForStyle(_style);
+      _rivalProfilesCache.putIfAbsent(_style,
+          () => List.unmodifiable(widget.repository.importedRivalsForStyle(_style)));
   Map<int, String> get _rivalNames =>
       {for (final rival in _rivalProfiles) rival.slot: rival.djName ?? ''};
+  List<RivalScore> _rivalScoresFor(Chart chart) =>
+      _rivalScoresCache.putIfAbsent(
+          chart.id, () => List.unmodifiable(widget.repository.rivalScores(chart)));
 
   List<_RivalWinLossSummary> _calculateRivalWinLossSummaries() {
     // フォルダ選択時の勝敗数は、選択中フォルダの内容ではなく
@@ -106,7 +132,7 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
           var losses = 0;
           for (final chart in charts) {
             final latest = _recordFor(chart);
-            final best = widget.repository.bestRecordFor(chart.id);
+            final best = widget.repository.historicalBestRecordFor(chart.id);
             if (latest.score <= 0 || best == null || best.score <= 0) continue;
             // 同点はライバル比較と同様に負けとして扱う。
             if (latest.score > best.score) {
@@ -298,14 +324,13 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
     if (_folderSelected && _folder == folder && _selectedSongTitle == null) {
       return;
     }
-    setState(() {
-      _folder = folder;
-      _folderSelected = true;
-      _selectedExpandedIndex = null;
-      _selectedSongTitle = null;
-      _selectedRowBaseChartId = null;
-      _selectedRowChartOverride = null;
-    });
+    _folder = folder;
+    _folderSelected = true;
+    _selectedExpandedIndex = null;
+    _selectedSongTitle = null;
+    _selectedRowBaseChartId = null;
+    _selectedRowChartOverride = null;
+    _notifySelectionChanged();
   }
 
   bool _isInitialFolder(String folder) => const {
@@ -323,11 +348,80 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
       _isInitialFolder(folder) ||
       _MusicSelectPanel.versionFolders.contains(folder);
 
-  List<Chart> get _visibleExpandedSongs =>
-      _expandedFolder != null && _usesSelectedChartForFolder(_expandedFolder!)
-          ? _folderSongsFor(_expandedFolder!,
-              preferredType: _folderChartType ?? _chartType)
-          : _expandedSongs;
+  List<Chart> get _visibleExpandedSongs {
+    final query = _searchQuery.trim();
+    if (query.isNotEmpty) {
+      return _searchResults(query);
+    }
+    return _expandedFolder != null && _usesSelectedChartForFolder(_expandedFolder!)
+        ? _folderSongsFor(_expandedFolder!,
+            preferredType: _folderChartType ?? _chartType)
+        : _expandedSongs;
+  }
+
+  List<Chart> _searchResults(String query) {
+    final normalized = query.toUpperCase();
+    final preferredType = _searchChartType ?? _chartType;
+    final cacheKey = '${_style.name}\u0000${preferredType.name}\u0000$normalized';
+    if (_searchResultsCacheKey == cacheKey && _searchResultsCache != null) {
+      return _searchResultsCache!;
+    }
+    // 検索は「楽曲」単位。譜面が複数ある曲は、現在の譜面種類を優先して
+    // 1行だけ表示し、該当譜面がなければ既存の代替表示規則を適用する。
+    final results = List<Chart>.unmodifiable(_oneChartPerSong(
+      _styleCharts.where((chart) =>
+          chart.songTitle.toUpperCase().contains(normalized) ||
+          chart.artist.toUpperCase().contains(normalized)),
+      preferredType,
+    ));
+    _searchResultsCacheKey = cacheKey;
+    _searchResultsCache = results;
+    return results;
+  }
+
+  void _changeSearchQuery(String value) {
+    final next = value.trim();
+    if (_searchQuery == next) return;
+    if (next.isNotEmpty) {
+      // 検索中は行移動で _chartType が変化しても、結果リストの構成を維持する。
+      _searchChartType ??= _chartType;
+    } else {
+      _searchChartType = null;
+    }
+    // 入力内容が変わる時だけ検索結果を作り直す。
+    _searchResultsCacheKey = null;
+    _searchResultsCache = null;
+    final matches = next.isEmpty
+        ? const <Chart>[]
+        : _searchResults(next);
+    setState(() {
+      _searchQuery = next;
+      // 検索中はフォルダを表示せず、常に先頭の一致譜面を選択行に置く。
+      // これにより検索語を入力するたびに左側の情報も対象楽曲へ同期する。
+      if (matches.isNotEmpty) {
+        final first = matches.first;
+        _selectedSongTitle = first.songTitle;
+        _selectedExpandedIndex = 0;
+        _selectedRowBaseChartId = first.id;
+        _selectedRowChartOverride = null;
+        _folderSelected = false;
+        _chartType = first.type;
+      } else if (next.isNotEmpty) {
+        _selectedSongTitle = null;
+        _selectedExpandedIndex = null;
+        _selectedRowBaseChartId = null;
+        _selectedRowChartOverride = null;
+        _folderSelected = true;
+      } else {
+        // 検索を消したら従来のフォルダ選択状態へ戻す。
+        _selectedSongTitle = null;
+        _selectedExpandedIndex = null;
+        _selectedRowBaseChartId = null;
+        _selectedRowChartOverride = null;
+        _folderSelected = true;
+      }
+    });
+  }
 
   /// フォルダ選択時に表示する曲数。VERSION／INITIALは譜面種類の選択に
   /// 応じて1曲1譜面、LEVELやCLEAR等は譜面単位で数える。
@@ -354,14 +448,13 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
         _chartType == chart.type) {
       return;
     }
-    setState(() {
-      _selectedSongTitle = chart.songTitle;
-      _selectedExpandedIndex = index;
-      _selectedRowBaseChartId = chart.id;
-      _selectedRowChartOverride = null;
-      _folderSelected = false;
-      _chartType = chart.type;
-    });
+    _selectedSongTitle = chart.songTitle;
+    _selectedExpandedIndex = index;
+    _selectedRowBaseChartId = chart.id;
+    _selectedRowChartOverride = null;
+    _folderSelected = false;
+    _chartType = chart.type;
+    _notifySelectionChanged();
   }
 
   /// ホイール／ドラッグの途中で選択行に最も近い楽曲を反映する。
@@ -374,18 +467,30 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
         _chartType == chart.type) {
       return;
     }
+    _selectedSongTitle = chart.songTitle;
+    _selectedExpandedIndex = index;
+    _selectedRowBaseChartId = chart.id;
+    _selectedRowChartOverride = null;
+    _folderSelected = false;
+    _chartType = chart.type;
+    // スクロール中は右側リストへ親Widgetの更新を渡さない。選択情報だけを
+    // 局所描画し、リストのScrollControllerはそのまま保持する。
+    _transientSongFocus = false;
+    _notifySelectionChanged();
+  }
+
+  void _selectChartType(ChartType value) {
     setState(() {
-      _selectedSongTitle = chart.songTitle;
-      _selectedExpandedIndex = index;
-      _selectedRowBaseChartId = chart.id;
-      _selectedRowChartOverride = null;
-      _folderSelected = false;
-      _chartType = chart.type;
-      _transientSongFocus = true;
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_transientSongFocus) return;
-      setState(() => _transientSongFocus = false);
+      // 譜面種類のタップは一覧の選択行自体は動かさず、選択行と左側の
+      // 譜面情報だけを切り替える従来仕様を維持する。
+      _chartType = value;
+      if (!_folderSelected) {
+        _selectedRowChartOverride = _selectedSongCharts
+            .where((chart) => chart.type == value)
+            .firstOrNull;
+      } else if (_expandedFolder != null) {
+        _folderChartType = value;
+      }
     });
   }
 
@@ -601,13 +706,14 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
     return charts;
   }
 
-  PlayRecord _recordFor(Chart chart) =>
-      widget.repository.recordFor(chart.id) ??
-      PlayRecord(
-          chartId: chart.id,
-          score: 0,
-          clear: ClearType.noPlay,
-          version: chart.version);
+  PlayRecord _recordFor(Chart chart) => _playRecordCache.putIfAbsent(
+      chart.id,
+      () => widget.repository.recordFor(chart.id) ??
+          PlayRecord(
+              chartId: chart.id,
+              score: 0,
+              clear: ClearType.noPlay,
+              version: chart.version));
 
   List<Chart> _oneChartPerSong(
     Iterable<Chart> charts,
@@ -701,7 +807,8 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
         .firstMatch(folder);
     if (match == null) return false;
     final isMyBest = match.group(1) == 'MY BEST';
-    final best = isMyBest ? widget.repository.bestRecordFor(chart.id) : null;
+    final best =
+        isMyBest ? widget.repository.historicalBestRecordFor(chart.id) : null;
     final rival = isMyBest
         ? null
         : widget.repository
@@ -778,81 +885,79 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
                                   selected: _style,
                                   onSp: () => _selectStyle(PlayStyle.sp),
                                   onDp: () => _selectStyle(PlayStyle.dp))),
-                          Positioned(
-                              left: 62,
-                              top: 158,
-                              width: 480,
-                              child: _folderSelected
-                                  ? _FolderSongCount(
-                                      count: _selectedFolderSongCount)
-                                  : _SongBlock(chart: _chart)),
-                          Positioned(
-                              left: 62,
-                              top: 370,
-                              width: 470,
-                              child: _ChartSelector(
-                                  selected: _chartType,
-                                  available: _folderSelected
-                                      ? ChartType.values.toSet()
-                                      : _selectedSongCharts
-                                          .map((item) => item.type)
-                                          .toSet(),
-                                  levels: {
-                                    for (final item in _selectedSongCharts)
-                                      item.type: item.level
-                                  },
-                                  showLevels: !_folderSelected,
-                                  onSelect: (value) => setState(() {
-                                        // 楽曲選択中の譜面切替は、左側の表示だけを
-                                        // 切り替える。一覧のソート／選択行や、
-                                        // フォルダを開いた時点の基準譜面は変更しない。
-                                        // 次の楽曲へ選択行を移すと、一覧に表示している
-                                        // 基準譜面（_folderChartType）へ戻る。
-                                        _chartType = value;
-                                        if (!_folderSelected) {
-                                          // 選択行だけは、切替後の譜面の情報を表示する。
-                                          // それ以外の行はフォルダ展開時の表示を保つ。
-                                          _selectedRowChartOverride =
-                                              _selectedSongCharts
-                                                  .where((chart) =>
-                                                      chart.type == value)
-                                                  .firstOrNull;
-                                        } else if (_expandedFolder != null) {
-                                          // フォルダ行を選択中の切替は、従来どおり
-                                          // フォルダを開いた基準譜面として扱う。
-                                          _folderChartType = value;
-                                        }
-                                      }))),
-                          Positioned(
-                              left: 56,
-                              top: 470,
-                              width: 555,
-                              height: 181,
-                              child: _folderSelected
-                                  ? const _PlayStatus.empty()
-                                  : _PlayStatus(
-                                      chart: _chart, record: _record)),
-                          Positioned(
-                              left: 55,
-                              top: 666,
-                              width: 783,
-                              height: 260,
-                              child: _RivalScorePanel(
-                                  chart: _chart,
-                                  scores: widget.repository.rivalScores(_chart),
-                                  summaries: _rivalWinLossSummaries,
-                                  folderSelected: _folderSelected)),
-                          Positioned(
-                              left: 545,
-                              top: 64,
-                              width: 420,
-                              height: 445,
-                              child: _RadarBlock(
-                                  chart: _chart,
-                                  record: _record,
-                                  overallRadar:
-                                      _folderSelected ? _overallRadar : null,
-                                  hasOverallRadar: _hasOverallRadar)),
+                          Positioned.fill(
+                              child: ValueListenableBuilder<int>(
+                                  valueListenable: _selectionRevision,
+                                  builder: (context, _, __) => Stack(
+                                          clipBehavior: Clip.none,
+                                          children: [
+                                            Positioned(
+                                                left: 62,
+                                                top: 158,
+                                                width: 480,
+                                                child: _folderSelected
+                                                    ? _FolderSongCount(
+                                                        count:
+                                                            _selectedFolderSongCount)
+                                                    : _SongBlock(chart: _chart)),
+                                            Positioned(
+                                                left: 62,
+                                                top: 370,
+                                                width: 470,
+                                                child: _ChartSelector(
+                                                    selected: _chartType,
+                                                    available: _folderSelected
+                                                        ? ChartType.values
+                                                            .toSet()
+                                                        : _selectedSongCharts
+                                                            .map((item) =>
+                                                                item.type)
+                                                            .toSet(),
+                                                    levels: {
+                                                      for (final item
+                                                          in _selectedSongCharts)
+                                                        item.type: item.level
+                                                    },
+                                                    showLevels:
+                                                        !_folderSelected,
+                                                    onSelect: _selectChartType)),
+                                            Positioned(
+                                                left: 56,
+                                                top: 470,
+                                                width: 555,
+                                                height: 181,
+                                                child: _folderSelected
+                                                    ? const _PlayStatus.empty()
+                                                    : _PlayStatus(
+                                                        chart: _chart,
+                                                        record: _record)),
+                                            Positioned(
+                                                left: 55,
+                                                top: 666,
+                                                width: 783,
+                                                height: 260,
+                                                child: _RivalScorePanel(
+                                                    chart: _chart,
+                                                    scores:
+                                                        _rivalScoresFor(_chart),
+                                                    summaries:
+                                                        _rivalWinLossSummaries,
+                                                    folderSelected:
+                                                        _folderSelected)),
+                                            Positioned(
+                                                left: 545,
+                                                top: 64,
+                                                width: 420,
+                                                height: 445,
+                                                child: _RadarBlock(
+                                                    chart: _chart,
+                                                    record: _record,
+                                                    overallRadar: _folderSelected
+                                                        ? _overallRadar
+                                                        : null,
+                                                    hasOverallRadar:
+                                                        _hasOverallRadar)),
+                                          ]))),
                           Positioned(
                               left: 1034,
                               top: 22,
@@ -879,6 +984,7 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
                       key: _musicSelectKey,
                       selected: _folder,
                       sort: _sort,
+                      searchQuery: _searchQuery,
                       scale: scale,
                       devicePixelRatio: devicePixelRatio,
                       expandedFolder: _expandedFolder,
@@ -897,7 +1003,8 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
                       onSelectSong: _selectSongAt,
                       onFocusFolder: _focusFolder,
                       onFocusSong: _focusSongAt,
-                      onSort: _changeSort),
+                      onSort: _changeSort,
+                      onSearchChanged: _changeSearchQuery),
                 ),
               ]);
             },
@@ -906,6 +1013,9 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
       );
 
   bool _handleHardwareKeyEvent(KeyEvent event) {
+    // 検索欄の編集中は、矢印やPageキーをTextField本来の操作へ渡す。
+    // それ以外では従来どおりMUSIC SELECTのキー操作を優先する。
+    if (_musicSelectKey.currentState?.searchHasFocus ?? false) return false;
     final pageDirection = switch (event.logicalKey) {
       LogicalKeyboardKey.pageUp => -1,
       LogicalKeyboardKey.pageDown => 1,
@@ -964,6 +1074,7 @@ class _PlayDataMockScreenState extends State<PlayDataMockScreen> {
   void dispose() {
     _stopArrowRepeat();
     HardwareKeyboard.instance.removeHandler(_handleHardwareKeyEvent);
+    _selectionRevision.dispose();
     super.dispose();
   }
 
@@ -1631,8 +1742,12 @@ class _RivalScorePanel extends StatelessWidget {
           const Divider(height: 2, color: _kLine),
           Expanded(
               child: folderSelected
-                  ? _RivalWinLossList(summaries: summaries)
-                  : ListView.builder(
+                  ? _RivalScrollArea(
+                      builder: (controller) => _RivalWinLossList(
+                          summaries: summaries, controller: controller))
+                  : _RivalScrollArea(
+                      builder: (controller) => ListView.builder(
+                      controller: controller,
                       padding: EdgeInsets.zero,
                       physics: const BouncingScrollPhysics(),
                       itemCount: scores.length,
@@ -1690,22 +1805,72 @@ class _RivalScorePanel extends StatelessWidget {
                                 weight: FontWeight.w400),
                           ]),
                         );
-                      })),
+                      }))),
         ]),
       ),
     );
   }
 }
 
+/// RIVAL SCORE DATA内のホイールとドラッグを、この一覧だけで処理する。
+/// 親画面が持つMUSIC SELECT用ホイール処理へイベントを渡さないため、
+/// ライバル欄にカーソルがある間は右側のリストを動かさない。
+class _RivalScrollArea extends StatefulWidget {
+  const _RivalScrollArea({required this.builder});
+
+  final Widget Function(ScrollController controller) builder;
+
+  @override
+  State<_RivalScrollArea> createState() => _RivalScrollAreaState();
+}
+
+class _RivalScrollAreaState extends State<_RivalScrollArea> {
+  final _controller = ScrollController();
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
+      if (resolved is! PointerScrollEvent || !_controller.hasClients) return;
+      // ScrollPosition は縦スクロール量（double）を受け取る。
+      _controller.position.pointerScroll(resolved.scrollDelta.dy);
+    });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+        behavior: HitTestBehavior.opaque,
+        onPointerSignal: _handlePointerSignal,
+        child: ScrollConfiguration(
+          behavior: ScrollConfiguration.of(context).copyWith(
+            dragDevices: const {
+              PointerDeviceKind.touch,
+              PointerDeviceKind.stylus,
+              PointerDeviceKind.mouse,
+              PointerDeviceKind.trackpad,
+            },
+          ),
+          child: widget.builder(_controller),
+        ),
+      );
+}
+
 /// フォルダ選択時のRIVAL SCORE DATA。各ライバルのスコア勝敗だけを
 /// 10マスの横棒（勝ち＝黄、負け＝水色）として表示する。
 class _RivalWinLossList extends StatelessWidget {
-  const _RivalWinLossList({required this.summaries});
+  const _RivalWinLossList({required this.summaries, required this.controller});
   final List<_RivalWinLossSummary> summaries;
+  final ScrollController controller;
 
   @override
   Widget build(BuildContext context) {
     return ListView.builder(
+      controller: controller,
       padding: const EdgeInsets.only(top: 4),
       physics: const BouncingScrollPhysics(),
       // MY BESTはライバル10人とは別枠。11行目以降は従来どおりスクロールで参照する。
@@ -2016,6 +2181,7 @@ class _MusicSelectPanel extends StatefulWidget {
   const _MusicSelectPanel(
       {required this.selected,
       required this.sort,
+      required this.searchQuery,
       required this.scale,
       required this.devicePixelRatio,
       required this.expandedFolder,
@@ -2035,9 +2201,11 @@ class _MusicSelectPanel extends StatefulWidget {
       required this.onFocusFolder,
       required this.onFocusSong,
       required this.onSort,
+      required this.onSearchChanged,
       super.key});
   final String selected;
   final String sort;
+  final String searchQuery;
   final double scale;
   final double devicePixelRatio;
   final String? expandedFolder;
@@ -2057,6 +2225,7 @@ class _MusicSelectPanel extends StatefulWidget {
   final ValueChanged<String> onFocusFolder;
   final ValueChanged<int> onFocusSong;
   final ValueChanged<String> onSort;
+  final ValueChanged<String> onSearchChanged;
   static final _folders = [
     'LEVEL 1',
     'LEVEL 2',
@@ -2269,6 +2438,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   static const _loopCopies = 101;
   static const _selectionRowIndex = 5;
   late final ScrollController _controller;
+  late final TextEditingController _searchController;
+  late final FocusNode _searchFocusNode;
+  bool get searchHasFocus => _searchFocusNode.hasFocus;
   bool _isLoopJumping = false;
   bool _isSnapping = false;
   bool _suppressFocusNotifications = false;
@@ -2276,9 +2448,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   bool _isDraggingList = false;
   Timer? _scrollStopTimer;
   Timer? _wheelCoalesceTimer;
+  Timer? _wheelSettleTimer;
   int _pendingWheelDirection = 0;
-  int _queuedWheelSteps = 0;
-  bool _isProcessingWheel = false;
+  double? _wheelTargetOffset;
   int _queuedKeyboardSteps = 0;
   bool _isProcessingKeyboard = false;
   int _folderOperationEpoch = 0;
@@ -2291,6 +2463,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   int _frozenIndexShift = 0;
   int? _frozenItemCountEntries;
   String? _lastFocusedKey;
+  // 選択行の見た目だけは、親画面を再描画せず可視行だけ更新する。
+  // 少数の検索結果を循環した場合でも、スクロールを重くしない。
+  final ValueNotifier<int> _renderedSelectionIndex = ValueNotifier(0);
   late List<_MusicSelectEntry> _cachedEntries;
 
   double _snap(double value) =>
@@ -2300,6 +2475,14 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   double get _dividerHeight => 1 / widget.devicePixelRatio;
 
   List<_MusicSelectEntry> _entriesForExpanded(String? expandedFolder) {
+    // 検索中はフォルダ行を一切表示せず、楽曲名またはアーティスト名に
+    // 部分一致した楽曲だけをイニシャル順で循環表示する。
+    if (widget.searchQuery.trim().isNotEmpty) {
+      return [
+        for (var index = 0; index < widget.songs.length; index++)
+          _MusicSelectEntry.song(widget.songs[index], index),
+      ];
+    }
     // 展開中は、そのフォルダと配下の楽曲だけを表示する。
     // ほかのフォルダを同居させないことで、曲一覧そのものを1周する
     // MUSIC SELECTらしい循環リストにする。
@@ -2320,6 +2503,8 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   }
 
   List<_MusicSelectEntry> get _entries => _cachedEntries;
+
+  bool get _isSearching => widget.searchQuery.trim().isNotEmpty;
 
   void _refreshEntries() {
     _cachedEntries =
@@ -2346,6 +2531,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   /// 「一覧構成が変化した」と誤認して循環リストを組み直してしまう。
   /// 表示順を決める譜面ID列が同一なら、スクロール中の同一一覧として扱う。
   bool _sameCharts(List<Chart> first, List<Chart> second) {
+    // 検索結果・フォルダ結果は親画面側でキャッシュ済み。完全に同じListなら
+    // 数千譜面のID比較そのものを省略する。
+    if (identical(first, second)) return true;
     if (first.length != second.length) return false;
     for (var index = 0; index < first.length; index++) {
       if (first[index].id != second[index].id) return false;
@@ -2356,6 +2544,8 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
   @override
   void initState() {
     super.initState();
+    _searchController = TextEditingController(text: widget.searchQuery);
+    _searchFocusNode = FocusNode();
     _refreshEntries();
     // 少ないフォルダ数でも表示領域の外側に十分な余白を確保し、
     // 上下どちらへスクロールしても中央周へ戻せるようにする。
@@ -2367,11 +2557,22 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
         initialScrollOffset:
             math.max(0, _rowHeight * (folderCount * 3 - _selectionRowIndex)));
     _controller.addListener(_keepFolderLooping);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && _controller.hasClients && _entries.isNotEmpty) {
+        _renderedSelectionIndex.value = _selectedVirtualIndex(_entries);
+      }
+    });
   }
 
   @override
   void didUpdateWidget(covariant _MusicSelectPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (_searchController.text != widget.searchQuery) {
+      _searchController.value = TextEditingValue(
+        text: widget.searchQuery,
+        selection: TextSelection.collapsed(offset: widget.searchQuery.length),
+      );
+    }
     // 大量の楽曲行を毎フレーム作り直すと、展開・スクロールが重くなる。
     // 行構成が変化した場合だけ作り直し、通常の描画・スクロールでは再利用する。
     final entriesChanged = oldWidget.expandedFolder != widget.expandedFolder ||
@@ -2379,14 +2580,16 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
         oldWidget.visibleFolderGroups != widget.visibleFolderGroups ||
         oldWidget.showMyBest != widget.showMyBest ||
         !_sameRivalProfiles(oldWidget.rivalProfiles, widget.rivalProfiles);
+    final searchChanged = oldWidget.searchQuery != widget.searchQuery;
     // SP／DP切替では、ライバル登録状況などによってフォルダ総数が変わる。
     // 旧スクロール座標のまま新しい行構成を解釈すると別フォルダへ移るため、
     // 旧行を凍結表示したまま、切替前に選ばれていたフォルダを新しい周回の
     // 選択行へ移し替える。これにより新旧の行構成が混ざる1フレームを出さない。
     // 曲を選択中でも同じ方式で旧行を固定する。楽曲選択時だけ後から
     // _pinSongToSelectionLine を呼ぶと、新しい一覧が一度だけ旧座標で描画される。
-    final preserveSelection =
-        entriesChanged && oldWidget.expandedFolder == widget.expandedFolder;
+    final preserveSelection = entriesChanged &&
+        oldWidget.expandedFolder == widget.expandedFolder &&
+        !searchChanged;
     final preserveSong = preserveSelection &&
         widget.selectedSongTitle != null &&
         widget.selectedSongIndex != null;
@@ -2421,11 +2624,17 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     if (!preserveSelection &&
         !widget.transientSongFocus &&
         widget.selectedSongIndex != null &&
-        (oldWidget.selectedSongIndex != widget.selectedSongIndex ||
+        (searchChanged ||
+            oldWidget.selectedSongIndex != widget.selectedSongIndex ||
             oldWidget.selectedSongTitle != widget.selectedSongTitle)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && widget.selectedSongIndex != null) {
           _pinSongToSelectionLine(widget.selectedSongIndex!);
+          // 検索結果へ切り替えた直後は、行構成とスクロール位置が同じ
+          // フレームで更新されない場合がある。固定選択行の表示もここで
+          // 同期し、元行との位置ずれを残さない。
+          _lastFocusedKey = null;
+          _notifyFocusedEntry();
         }
       });
     }
@@ -2458,6 +2667,10 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
           _frozenItemCountEntries =
               math.max(previousEntries.length, newEntries.length);
         });
+        // 凍結した旧リストを新しい仮想座標へずらした時点で、選択行の
+        // 描画対象も同じ座標へ移す。ここが旧座標のままだと、開閉の1フレーム
+        // だけ張り出しが消えてしまう。
+        _setRenderedSelectionIndex(newAnchor);
         _jumpToLoopOffset(
             target.clamp(0.0, _controller.position.maxScrollExtent));
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2529,8 +2742,10 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     _scrollStopTimer = null;
     _wheelCoalesceTimer?.cancel();
     _wheelCoalesceTimer = null;
+    _wheelSettleTimer?.cancel();
+    _wheelSettleTimer = null;
     _pendingWheelDirection = 0;
-    _queuedWheelSteps = 0;
+    _wheelTargetOffset = null;
     _queuedKeyboardSteps = 0;
     if (_controller.hasClients) {
       _jumpToLoopOffset(_controller.offset);
@@ -2558,6 +2773,16 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     final songEntryIndex =
         entries.indexWhere((entry) => entry.songIndex == songIndex);
     if (songEntryIndex < 0 || entries.isEmpty) return;
+    // 検索結果を初めて表示する際は、常に十分な周回中央に置く。
+    // 少数結果の端で循環補正が直後に走り、カクつくのを防ぐ。
+    if (_isSearching) {
+      final targetIndex =
+          (_loopCopies ~/ 2) * entries.length + songEntryIndex;
+      final target = (targetIndex - _selectionRowIndex) * _rowHeight;
+      _jumpToLoopOffset(
+          target.clamp(0.0, _controller.position.maxScrollExtent));
+      return;
+    }
     final currentCycle = _selectedVirtualIndex(entries) ~/ entries.length;
     final targetIndex = currentCycle * entries.length + songEntryIndex;
     final target = (targetIndex - _selectionRowIndex) * _rowHeight;
@@ -2577,7 +2802,12 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     if (_isReflowing || _suppressFocusNotifications) return;
     final entries = _entries;
     if (entries.isEmpty) return;
-    final entry = entries[_selectedVirtualIndex(entries) % entries.length];
+    final selectedIndex = _selectedVirtualIndex(entries);
+    // 同じ楽曲が循環している少数の検索結果では、親側の選択曲が変わらない。
+    // この notifier は可視行だけを更新するため、一覧全体を setState で
+    // 再構築せずに左張り出しを選択行へ追従させられる。
+    _setRenderedSelectionIndex(selectedIndex);
+    final entry = entries[selectedIndex % entries.length];
     final key = entry.song == null
         ? 'folder:${entry.folder}'
         : 'song:${entry.songIndex}';
@@ -2587,6 +2817,12 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
       widget.onFocusSong(entry.songIndex!);
     } else {
       widget.onFocusFolder(entry.folder!);
+    }
+  }
+
+  void _setRenderedSelectionIndex(int index) {
+    if (_renderedSelectionIndex.value != index) {
+      _renderedSelectionIndex.value = index;
     }
   }
 
@@ -2693,6 +2929,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
       // controller の座標を新しい周回へ移しつつ、旧リスト側も同じフォルダを
       // 指すように仮想インデックスをずらす。
       setState(() => _frozenIndexShift = newAnchor - oldAnchor);
+      // 旧行を新しい周回位置へ対応付けたのと同じタイミングで、実際に
+      // 張り出す行も新しい仮想位置に切り替える。
+      _setRenderedSelectionIndex(newAnchor);
       _jumpToLoopOffset(
           target.clamp(0.0, _controller.position.maxScrollExtent));
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -2719,8 +2958,9 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     final operation = ++_folderOperationEpoch;
     final folder = widget.expandedFolder;
     if (folder == null) return;
-    // 右クリック直後の最初の描画から、閉鎖後の一覧だけを使う。
-    // 展開中の一覧でフォルダ行へ移動する中間状態は一切作らない。
+    // 閉鎖後の座標だけを先に計算する。以前はここで collapsedEntries を
+    // 一時描画してから親の一覧へ切り替えており、右クリック時だけ
+    // 1フレームの表示乱れが起きる原因になっていた。
     final collapsedEntries = _entriesForExpanded(null);
     final folderIndex =
         collapsedEntries.indexWhere((entry) => entry.folder == folder);
@@ -2729,35 +2969,41 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     _cancelPendingListMotion();
     setState(() {
       _isReflowing = true;
-      _frozenEntries = List<_MusicSelectEntry>.of(collapsedEntries);
-      _frozenExpandedFolder = null;
-      _frozenIndexShift = 0;
-      _frozenItemCountEntries = collapsedEntries.length;
     });
     // 閉鎖後の周回におけるフォルダ位置へ、同一フレームで配置する。
     final targetIndex =
         (_loopCopies ~/ 2) * collapsedEntries.length + folderIndex;
+    // 右クリックで閉じる場合も、最初の描画から閉鎖後フォルダを
+    // 選択行として張り出す。旧楽曲行に一瞬戻さない。
+    _setRenderedSelectionIndex(targetIndex);
     if (_controller.hasClients) {
       final targetOffset = (targetIndex - _selectionRowIndex) * _rowHeight;
       _jumpToLoopOffset(
           targetOffset.clamp(0.0, _controller.position.maxScrollExtent));
     }
-    // 親の展開状態も同一フレームで閉じる。これで次フレームに旧楽曲行が
-    // 混在する余地をなくす。
+    // 親の展開状態を同一イベント内で閉じる。仮リストを挟まず、次の
+    // 描画は閉鎖後の実リストだけにする。
     widget.onOpenFolder(folder);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || operation != _folderOperationEpoch) return;
       _pinFolderToSelectionLine(folder);
       setState(() {
-        _frozenEntries = null;
-        _frozenExpandedFolder = null;
-        _frozenIndexShift = 0;
-        _frozenItemCountEntries = null;
         _isReflowing = false;
       });
       _lastFocusedKey = null;
       _notifyFocusedEntry();
     });
+  }
+
+  /// 検索結果を見ている間の右クリックは、フォルダ操作ではなく検索解除に使う。
+  void _handleListSecondaryTap() {
+    if (_isSearching) {
+      _searchController.clear();
+      _searchFocusNode.unfocus();
+      widget.onSearchChanged('');
+      return;
+    }
+    _secondaryTapCloseExpandedFolder();
   }
 
   /// 楽曲行の左クリックは、スクロール通知への依存ではなく、移動完了時に
@@ -2851,13 +3097,14 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     GestureBinding.instance.pointerSignalResolver.register(event, (resolved) {
       if (resolved is! PointerScrollEvent) return;
       _pendingWheelDirection = resolved.scrollDelta.dy.isNegative ? -1 : 1;
-      _wheelCoalesceTimer ??= Timer(const Duration(milliseconds: 18), () {
+      // OS側の複数行設定を1行へ正規化しているため、ここで長く待つ必要はない。
+      // 入力直後から反応させ、連続ノッチだけを最小限まとめる。
+      _wheelCoalesceTimer ??= Timer(const Duration(milliseconds: 1), () {
         _wheelCoalesceTimer = null;
         final direction = _pendingWheelDirection;
         _pendingWheelDirection = 0;
         if (direction == 0) return;
-        _queuedWheelSteps += direction;
-        _drainWheelSteps();
+        _scrollWheelContinuously(direction);
       });
     });
   }
@@ -2872,7 +3119,7 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     if (direction == 0 ||
         _isReflowing ||
         _isDraggingList ||
-        _isProcessingWheel ||
+        _wheelTargetOffset != null ||
         !_controller.hasClients) {
       return;
     }
@@ -2947,37 +3194,47 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
     if (mounted) _notifyFocusedEntry();
   }
 
-  Future<void> _drainWheelSteps() async {
-    if (_isProcessingWheel || _isReflowing || !_controller.hasClients) return;
-    _isProcessingWheel = true;
+  /// ホイール入力は「ノッチごとに animateTo の完了を待つ」のではなく、
+  /// 進行中のアニメーションの移動先だけを更新する。これにより連続操作中も
+  /// リストが止まらず、指の操作に追従して流れる。
+  void _scrollWheelContinuously(int direction) {
+    if (direction == 0 || _isReflowing || !_controller.hasClients) return;
     _isSnapping = true;
-    while (mounted && _queuedWheelSteps != 0 && _controller.hasClients) {
-      // 連続入力は一つの移動先へまとめる。1行ごとにアニメーションを
-      // 止めないことで、速く回したときにもカクつかずに流れる。
-      final steps = _queuedWheelSteps;
-      _queuedWheelSteps = 0;
-      final currentRow = (_controller.offset / _rowHeight).round();
-      final target = ((currentRow + steps) * _rowHeight)
-          .clamp(0.0, _controller.position.maxScrollExtent);
-      final duration = Duration(
-          milliseconds: (175 + (steps.abs() - 1) * 55).clamp(175, 360));
-      await _controller.animateTo(target,
-          duration: duration, curve: Curves.easeInOutCubic);
-    }
-    _isSnapping = false;
-    _isProcessingWheel = false;
-    // ホイールのアニメーション中は通常のスナップを抑止しているため、
-    // 完了後に必ず行境界へ合わせ直す。これが無いと中間位置が残る。
-    await _snapToSelectionRow();
-    if (mounted) _notifyFocusedEntry();
+    final base = _wheelTargetOffset ?? _controller.offset;
+    final target = (base + direction * _rowHeight)
+        .clamp(0.0, _controller.position.maxScrollExtent)
+        .toDouble();
+    _wheelTargetOffset = target;
+
+    // 新しい入力が来れば直前の ScrollActivity は自動で置き換わる。
+    // await しないため、後続ノッチが前の移動完了待ちにならない。
+    unawaited(_controller.animateTo(
+      target,
+      duration: const Duration(milliseconds: 72),
+      curve: Curves.easeOutCubic,
+    ));
+
+    _wheelSettleTimer?.cancel();
+    _wheelSettleTimer = Timer(const Duration(milliseconds: 86), () async {
+      _wheelTargetOffset = null;
+      if (!mounted || !_controller.hasClients) return;
+      _isSnapping = false;
+      _keepFolderLooping();
+      await _snapToSelectionRow();
+      if (mounted) _notifyFocusedEntry();
+    });
   }
 
   @override
   void dispose() {
     _scrollStopTimer?.cancel();
     _wheelCoalesceTimer?.cancel();
+    _wheelSettleTimer?.cancel();
     _controller.removeListener(_keepFolderLooping);
     _controller.dispose();
+    _renderedSelectionIndex.dispose();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
     super.dispose();
   }
 
@@ -2995,11 +3252,55 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
               height: _snap(61),
               child: Row(children: [
                 Expanded(
-                    child: Center(
-                        child: _OutlineText('MUSIC SELECT',
-                            fontSize: 25 * widget.scale,
-                            fontFamily: 'Gochikakutto',
-                            letterSpacing: 1.5 * widget.scale))),
+                    child: Padding(
+                        padding: EdgeInsets.only(
+                            left: _snap(24),
+                            right: _snap(8),
+                            top: _snap(10),
+                            bottom: _snap(10)),
+                        child: TextField(
+                          controller: _searchController,
+                          focusNode: _searchFocusNode,
+                          onChanged: widget.onSearchChanged,
+                          textInputAction: TextInputAction.search,
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 20 * widget.scale,
+                              // 楽曲リスト行の曲名と同じ標準フォント。
+                              fontFamily: 'Arial',
+                              fontWeight: FontWeight.normal,
+                              shadows: const [
+                                Shadow(color: Colors.black, offset: Offset(-1, -1)),
+                                Shadow(color: Colors.black, offset: Offset(1, -1)),
+                                Shadow(color: Colors.black, offset: Offset(-1, 1)),
+                                Shadow(color: Colors.black, offset: Offset(1, 1)),
+                              ]),
+                          cursorColor: _kCyan,
+                          decoration: InputDecoration(
+                            isDense: true,
+                            hintText: '楽曲名を検索',
+                            hintStyle: TextStyle(
+                                color: const Color(0xffa8d8e9),
+                                fontSize: 18 * widget.scale,
+                                fontFamily: 'Arial',
+                                fontWeight: FontWeight.normal),
+                            suffixIcon: Icon(Icons.search,
+                                color: _kCyan, size: 25 * widget.scale),
+                            suffixIconConstraints: BoxConstraints(
+                                minWidth: _snap(46), minHeight: _snap(38)),
+                            contentPadding: EdgeInsets.symmetric(
+                                horizontal: _snap(14), vertical: _snap(7)),
+                            filled: true,
+                            fillColor: const Color(0xff06314f),
+                            enabledBorder: OutlineInputBorder(
+                                borderSide: const BorderSide(color: _kCyan),
+                                borderRadius: BorderRadius.circular(_snap(5))),
+                            focusedBorder: OutlineInputBorder(
+                                borderSide: BorderSide(
+                                    color: _kCyan, width: _snap(2)),
+                                borderRadius: BorderRadius.circular(_snap(5))),
+                          ),
+                        ))),
                 SizedBox(
                   width: _snap(230),
                   child: Padding(
@@ -3007,17 +3308,14 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
                     child: DropdownButtonFormField<String>(
                       value: widget.sort,
                       isDense: true,
-                      // ゴチカクットは横幅が広いため、選択値に残り幅を
-                      // 割り当て、右端の矢印と競合させない。
+                      // ソート欄は可読性を優先して標準フォントを使う。
                       isExpanded: true,
                       iconSize: 16 * widget.scale,
                       dropdownColor: const Color(0xff05233d),
                       style: TextStyle(
-                          // ゴチカクットは太字にすると漢字の画が潰れるため、
-                          // 通常ウェイトで枠内に収まる大きさにする。
-                          fontSize: 17 * widget.scale,
+                          fontSize: 16 * widget.scale,
                           fontWeight: FontWeight.w400,
-                          fontFamily: 'Gochikakutto',
+                          fontFamily: 'Arial',
                           color: Colors.white,
                           shadows: const [
                             Shadow(color: Colors.black, offset: Offset(-1, -1)),
@@ -3050,11 +3348,10 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
                               value: item,
                               child: Text(item,
                                   style: TextStyle(
-                                      // 展開メニューは一覧として読みやすい大きさを
-                                      // 優先し、閉じた入力枠より一段大きくする。
-                                      fontSize: 24 * widget.scale,
+                                      // 展開メニューも選択欄と同じ標準フォント。
+                                      fontSize: 22 * widget.scale,
                                       fontWeight: FontWeight.w400,
-                                      fontFamily: 'Gochikakutto',
+                                      fontFamily: 'Arial',
                                       shadows: const [
                                         Shadow(
                                             color: Colors.black,
@@ -3109,6 +3406,14 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
                         child: Builder(builder: (context) {
                           final frozenEntries = _frozenEntries;
                           final entries = frozenEntries ?? _entries;
+                          if (entries.isEmpty) {
+                            return Center(
+                                child: _OutlineText('該当する楽曲が見つかりません',
+                                    fontSize: 20 * widget.scale,
+                                    fontFamily: 'Gochikakutto',
+                                    letterSpacing: .6 * widget.scale,
+                                    color: const Color(0xffb8e9f7)));
+                          }
                           // 凍結中も itemCount は展開後の行数にする。これにより
                           // 新しい周回位置へ移動してもスクロール範囲が縮まらない。
                           final itemCountEntryLength = frozenEntries == null
@@ -3133,55 +3438,69 @@ class _MusicSelectPanelState extends State<_MusicSelectPanel> {
                                     final displayIndex = frozenEntries == null
                                         ? index
                                         : index - _frozenIndexShift;
-                                    final entry = entries[
-                                        displayIndex % entries.length < 0
-                                            ? displayIndex % entries.length +
-                                                entries.length
-                                            : displayIndex % entries.length];
-                                    final isSelectedRow =
-                                        index == _selectedVirtualIndex(entries);
-                                    late final Widget row;
-                                    if (entry.song case final song?) {
-                                      final displaySong =
-                                          widget.displayChartForRow(song);
-                                      row = Listener(
-                                          behavior: HitTestBehavior.opaque,
-                                          onPointerSignal: _handlePointerSignal,
-                                          child: GestureDetector(
-                                              onTap: () => _tapSong(index),
-                                              onSecondaryTap:
-                                                  _secondaryTapCloseExpandedFolder,
-                                              child: _SongRow(
-                                                  chart: displaySong,
-                                                  clear: widget.clearForChart(
-                                                      displaySong),
-                                                  selected: isSelectedRow,
-                                                  height: _rowHeight,
-                                                  scale: widget.scale,
-                                                  dividerHeight:
-                                                      _dividerHeight)));
-                                    } else {
-                                      final folder = entry.folder!;
-                                      row = Listener(
-                                          behavior: HitTestBehavior.opaque,
-                                          onPointerSignal: _handlePointerSignal,
-                                          child: GestureDetector(
-                                              onTap: () => _tapFolder(
-                                                  folder, index, entries),
-                                              onSecondaryTap:
-                                                  _secondaryTapCloseExpandedFolder,
-                                              child: _FolderRow(
-                                                  label: folder,
-                                                  clear: widget
-                                                      .folderClearFor(folder),
-                                                  selected: isSelectedRow,
-                                                  height: _rowHeight,
-                                                  scale: widget.scale,
-                                                  rivalNames: widget.rivalNames,
-                                                  dividerHeight:
-                                                      _dividerHeight)));
-                                    }
-                                    return row;
+                                    final remainder =
+                                        displayIndex % entries.length;
+                                    final entry = entries[remainder < 0
+                                        ? remainder + entries.length
+                                        : remainder];
+                                    return ValueListenableBuilder<int>(
+                                        valueListenable:
+                                            _renderedSelectionIndex,
+                                        builder: (context, selectedIndex, _) {
+                                          final isSelectedRow =
+                                              index == selectedIndex;
+                                          if (entry.song case final song?) {
+                                            final displaySong = widget
+                                                .displayChartForRow(song);
+                                            return Listener(
+                                                behavior:
+                                                    HitTestBehavior.opaque,
+                                                onPointerSignal:
+                                                    _handlePointerSignal,
+                                                child: GestureDetector(
+                                                    onTap: () =>
+                                                        _tapSong(index),
+                                                    onSecondaryTap:
+                                                        _handleListSecondaryTap,
+                                                    child: _SongRow(
+                                                        chart: displaySong,
+                                                        clear: widget
+                                                            .clearForChart(
+                                                                displaySong),
+                                                        // 固定の選択枠に重ねて別の行を描かず、
+                                                        // 実際に選択されている行だけを張り出す。
+                                                        // これによりスクロール中も張り出しが
+                                                        // 消えず、同じ行の二重描画も起きない。
+                                                        selected: isSelectedRow,
+                                                        height: _rowHeight,
+                                                        scale: widget.scale,
+                                                        dividerHeight:
+                                                            _dividerHeight)));
+                                          }
+                                          final folder = entry.folder!;
+                                          return Listener(
+                                              behavior:
+                                                  HitTestBehavior.opaque,
+                                              onPointerSignal:
+                                                  _handlePointerSignal,
+                                              child: GestureDetector(
+                                                  onTap: () => _tapFolder(
+                                                      folder, index, entries),
+                                                  onSecondaryTap:
+                                                      _handleListSecondaryTap,
+                                                  child: _FolderRow(
+                                                      label: folder,
+                                                      clear: widget
+                                                          .folderClearFor(
+                                                              folder),
+                                                      selected: isSelectedRow,
+                                                      height: _rowHeight,
+                                                      scale: widget.scale,
+                                                      rivalNames:
+                                                          widget.rivalNames,
+                                                      dividerHeight:
+                                                          _dividerHeight)));
+                                        });
                                   }));
                         }))),
                 Positioned(
@@ -3448,10 +3767,17 @@ class _SongRow extends StatelessWidget {
         ChartType.leggendaria => const Color(0xff9050cf),
       };
   @override
-  Widget build(BuildContext context) => Transform.translate(
-        // フォルダ行と同じく、選択された楽曲を少し左へ張り出す。
-        offset: Offset(selected ? -27 * scale : 0, 0),
-        child: Container(
+  Widget build(BuildContext context) => Stack(
+        clipBehavior: Clip.none,
+        children: [
+          // 左端を負の位置に固定し、右端は0に維持する。これなら検索結果を
+          // 含めてListViewの行幅制約に関係なく、選択行の本体が確実に張り出す。
+          Positioned(
+            left: selected ? -27 * scale : 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            child: Container(
           height: height,
           color: const Color(0xff061f39),
           child: Stack(fit: StackFit.expand, children: [
@@ -3528,7 +3854,9 @@ class _SongRow extends StatelessWidget {
                 height: dividerHeight,
                 child: const ColoredBox(color: Color(0xff65cdeb))),
           ]),
-        ),
+            ),
+          ),
+        ],
       );
 }
 

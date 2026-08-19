@@ -1,5 +1,5 @@
-{
-  "source": "CSV楽曲名_マスター対応確認.xlsx",
+﻿{
+  "source": "ノーツレーダー値一覧.xlsm / 表記ゆれ対応表",
   "description": "確認済みの公式CSV楽曲名からマスター楽曲名への対応表",
   "aliases": {
     "!Viva!": "¡Viva!",
@@ -37,7 +37,6 @@
     "Raspberry Potion (feat.あれたん & ぎゃるのしん☆)": "Raspberry Potion(feat.あれたん♡ & ぎゃるのしん☆)",
     "RINNE": "RINИE",
     "ROCK女 feat. 大山愛未， Ken": "ROCK女 feat. 大山愛未, Ken",
-    "SEQUENCE CAT": "SEQUENCE CAT",
     "Space Battleship S4TO": "Space Battleship S4TØ",
     "Space In Time": "Space in Time",
     "Sweet Sweet Magic": "Sweet Sweet♡Magic",
@@ -46,20 +45,29 @@
     "Uaigh Gealai": "Uaigh Gealaí",
     "Ubertreffen": "Übertreffen",
     "uen": "uən",
+    "ＵＬＴｉＭΛＴＥ": "ULTiM∧TE",
     "VOID": "VØID",
     "Xlo": "Xlø",
-    "Τeλοs": "Τέλος",
     "オッドラヴィ": "オッド♡ラヴィ",
     "キャトられ恋はモ～モク": "キャトられ♥恋はモ～モク",
     "ギョギョっと人魚 爆婚ブライダル": "ギョギョっと人魚♨爆婚ブライダル",
-    "ビビッド ☆+*。キラキライム": "ビビッド ☆＋＊。キラキライム",
     "ピアノ協奏曲第１番”蠍火”": "ピアノ協奏曲第1番\"蠍火\"",
-    "旋律のドグマ～Miserables～": "旋律のドグマ～Misérables～",
-    "最強頂戴girl": "最強頂戴girl♡",
+    "ビビッド ☆+*。キラキライム": "ビビッド ☆＋＊。キラキライム",
     "火影": "焱影",
     "華麗なる！音戯探偵ひなビタ": "華麗なる！音戯探偵ひなビタ♫",
-    "表裏一体！？怪盗いいんちょの悩み": "表裏一体！？怪盗いいんちょの悩み♥",
+    "最強頂戴girl": "最強頂戴girl♡",
+    "旋律のドグマ～Miserables～": "旋律のドグマ～Misérables～",
     "超!!遠距離らぶメ～ル": "超!!遠距離らぶ♡メ～ル",
-    "ＵＬＴｉＭΛＴＥ": "ULTiM∧TE"
+    "表裏一体！？怪盗いいんちょの悩み": "表裏一体！？怪盗いいんちょの悩み♥",
+    "Τeλοs": "Τέλος",
+    "Anisakis -somatic mutation typeForza-": "Anisakis -somatic mutation type\"Forza\"-",
+    "satellite020712 from CODED ARMS": "satellite020712 from \"CODED ARMS\"",
+    "You'll say Now!": "You'll say \"Now!\"",
+    "水上の提督(Short mix from 幻想水滸伝V)": "水上の提督(Short mix from \"幻想水滸伝V\")",
+    "Life Is A Game ft.DDナカタMetal": "Life Is A Game ft.DD\"ナカタ\"Metal",
+    "Next Tales 2 Oath (IIDX 20th Anniv Ring Theme)": "Next Tales 2 Oath (IIDX 20th Anniv \"Ring\" Theme)",
+    "ピアノ独奏無言歌 灰燼": "ピアノ独奏無言歌 \"灰燼\"",
+    "wanna be a BAD GIRL feat. Nana Takahashi": "wanna be a \"BAD GIRL\" feat. Nana Takahashi",
+    "灼熱Beach Side Bunny (かめりあ's Summertime D'n'B Remix)": "灼熱Beach Side Bunny (かめりあ's \"Summertime D'n'B\" Remix)"
   }
 }
